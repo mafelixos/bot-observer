@@ -1,26 +1,28 @@
 # bot-observer
 
-Structured JSON event logging and crash reporting for Discord.js bots, delivered straight to your DMs.
+Structured event logging and crash reporting for Discord.js bots, delivered straight to your DMs.
 
 ## What it does
 
-bot-observer instruments your Discord.js bot to emit structured log events — command usage, errors, latency, crashes — and delivers them as formatted Discord embeds to a private DM channel. No external services, no dashboard, no database. Just your bot talking to you directly.
+bot-observer piggybacks on your bot's existing Discord client to send structured log events — command usage, errors, latency spikes, crashes — as formatted embeds to a private DM channel. One login, no external services, no database.
+
+If your bot crashes before it ever logs in, bot-observer spins up a temporary client using the same token, sends the crash report, and tears it back down. You get notified either way.
 
 ## Features
 
-- Command usage tracking with latency
-- Error and exception reporting with stack traces
-- Crash detection via `uncaughtException` and `unhandledRejection` hooks
-- Color-coded Discord embeds by severity
-- Rate-limit-safe event queue (1s flush interval)
-- DM channel cached on startup to avoid repeated API calls
+- Hooks into your existing client — no second login in normal operation
+- Early crash detection before `client.login()` is ever called
+- Fallback emergency login for pre-startup failures
+- Color-coded embeds by event severity
+- Rate-limit-safe queue with 1s flush interval
+- DM channel cached on startup
 
 ## Event types
 
-| Event | Trigger | Embed color |
+| Event | Trigger | Color |
 |---|---|---|
 | `startup` | Bot comes online | Green |
-| `command_used` | Any command invoked | Blue |
+| `command_used` | Any slash command invoked | Blue |
 | `slow_response` | Latency exceeds threshold | Yellow |
 | `error` | Caught exception | Orange |
 | `crash` | Uncaught exception / unhandled rejection | Red |
@@ -35,24 +37,28 @@ npm install
 
 ### 2. Configure
 
-Create a `.env` file in the project root:
-
 ```env
 DISCORD_TOKEN=your_bot_token_here
 LOG_USER_ID=your_discord_user_id
 SLOW_RESPONSE_MS=2000
 ```
 
-`LOG_USER_ID` is your personal Discord user ID — the bot will open a DM with you on startup and send all logs there.
+`LOG_USER_ID` is your personal Discord user ID. The bot will open a DM with you on startup and deliver all logs there.
 
 ### 3. Add to your bot
 
-```js
-import { bot-observer } from './bot-observer.js'
+Import bot-observer **at the very top of your entry point**, before anything else. This is what enables pre-startup crash detection.
 
-const bot-observer = new bot-observer(client)
-await bot-observer.init()
+```js
+import { botObserver } from './bot-observer.js'
+
+// ... rest of your bot setup ...
+
+await client.login(TOKEN)
+await botObserver.init(client)
 ```
+
+That's it. Crash hooks are registered the moment the import runs. `init()` hands bot-observer your live client so it can borrow it for all subsequent logging.
 
 ## Usage
 
@@ -63,7 +69,7 @@ const start = Date.now()
 
 // your command logic...
 
-bot-observer.log({
+botObserver.log({
   event: 'command_used',
   command: interaction.commandName,
   guild: interaction.guild?.name,
@@ -72,15 +78,29 @@ bot-observer.log({
 })
 ```
 
+### Log a slow response
+
+```js
+const latency = Date.now() - start
+
+if (latency > SLOW_MS) {
+  botObserver.log({
+    event: 'slow_response',
+    command: interaction.commandName,
+    latency_ms: latency
+  })
+}
+```
+
 ### Log an error
 
 ```js
 try {
   // your logic...
 } catch (err) {
-  bot-observer.log({
+  botObserver.log({
     event: 'error',
-    command: 'commandName',
+    command: interaction.commandName,
     message: err.message,
     stack: err.stack
   })
@@ -89,17 +109,13 @@ try {
 
 ### Crash reporting
 
-Crash hooks are registered automatically on `bot-observer.init()`. No extra setup needed.
+Registered automatically on import. No setup needed.
 
-```js
-// Handled automatically — logs then exits cleanly
-process.on('uncaughtException', ...)
-process.on('unhandledRejection', ...)
-```
+Uncaught exceptions log the crash and exit. Unhandled rejections log the crash and keep the process alive.
 
-## Log payload schema
+## Payload schema
 
-Every event posted to the backend follows this shape:
+All fields except `event` are optional and only appear in the embed if provided.
 
 ```json
 {
@@ -117,18 +133,16 @@ Every event posted to the backend follows this shape:
 
 ```
 bot-observer/
-├── bot-observer.js        # Core logger class
-├── queue.js         # Rate-limit-safe event queue
-├── embeds.js        # Discord embed formatters
-├── index.js         # Example bot entry point
+├── bot-observer.js   # BotObserver class, Queue, embed builder
 ├── .env.example
 └── README.md
 ```
 
 ## Limitations
 
-- bot-observer cannot detect a hard process kill (`SIGKILL`) or an OOM termination — only graceful crashes via the Node.js exception hooks
-- DM channels are subject to Discord's standard rate limits (5 req/s). The built-in queue handles normal error bursts, but a catastrophic crash loop may still get throttled before all events land
+- Cannot detect `SIGKILL` or OOM termination — only graceful crashes via Node.js exception hooks
+- If the emergency login itself fails (bad token, no network), the crash report is lost
+- DM channels are subject to Discord's rate limits. The built-in queue handles normal bursts, but a crash loop may be throttled before all events land
 
 ## License
 
